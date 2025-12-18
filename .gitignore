@@ -52,7 +52,7 @@ coverage.xml
 cover/
 
 # User folder
-job/
+jobs/
 
 # Translations
 *.mo
