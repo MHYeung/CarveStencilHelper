@@ -350,7 +350,10 @@ def generate_job(
     mask = remove_background_to_mask(img)
     mask = normalize_subject_mask(mask, anchor_xy=(0.5, 0.75))
     cv2.imwrite(os.path.join(out_dir, "debug_mask.png"), mask)
+    mask_2d = mask  # keep a photo-aligned mask for FRONT + cutout alpha
 
+    left_mask = None
+    back_mask = None
     front_mask = None
     right_mask = None
     top_mask = None
@@ -366,7 +369,11 @@ def generate_job(
         os.makedirs(recon_dir, exist_ok=True)
 
         # TripoSR works best on a cutout. Use the resized ROI image here.
-        cutout_path = os.path.join(out_dir, "debug_roi_resized.png")
+        cutout_path = os.path.join(out_dir, "cutout.png")
+        rgba = img.convert("RGBA")
+        mask_pil = Image.fromarray(mask)  # or your bg-removal mask BEFORE normalize
+        rgba.putalpha(mask_pil)
+        rgba.save(cutout_path)
 
         recon = TripoSRReconstructor("third_party/TripoSR")
         rr = recon.reconstruct(cutout_path, recon_dir)
@@ -375,12 +382,21 @@ def generate_job(
         mesh_path = os.path.join(out_dir, "debug_mesh.obj")
         mesh.export(mesh_path)
 
-        front_mask = mesh_silhouette_mask(mesh, "front", img_size=1024)
-        right_mask = mesh_silhouette_mask(mesh, "right", img_size=1024)
-        top_mask = mesh_silhouette_mask(mesh, "top", img_size=1024) if include_top else None
+        # HYBRID:
+        # FRONT stays 2D (aligned with the photo)
+        front_mask = mask_2d
+
+        # other faces from 3D silhouettes
+        right_mask = mesh_silhouette_mask(mesh, "right", img_size=2048)
+        left_mask  = mesh_silhouette_mask(mesh, "left",  img_size=2048)
+        back_mask  = mesh_silhouette_mask(mesh, "back",  img_size=2048)
+
+        top_mask = mesh_silhouette_mask(mesh, "top", img_size=2048) if include_top else None
 
         cv2.imwrite(os.path.join(out_dir, "debug_front_mask.png"), front_mask)
         cv2.imwrite(os.path.join(out_dir, "debug_right_mask.png"), right_mask)
+        cv2.imwrite(os.path.join(out_dir, "debug_left_mask.png"), left_mask)
+        cv2.imwrite(os.path.join(out_dir, "debug_back_mask.png"), back_mask)
         if include_top and top_mask is not None:
             cv2.imwrite(os.path.join(out_dir, "debug_top_mask.png"), top_mask)
 
@@ -388,12 +404,17 @@ def generate_job(
         # Existing 2D approach: one silhouette reused
         front_mask = mask
         right_mask = mask
-        top_mask = mask if include_top else None
+        left_mask = None
+        back_mask = None
+        top_mask = mask_2d if include_top else None
 
     # Now extract polylines from whichever masks were selected
     front_poly = mask_to_polyline(front_mask, detail=detail)
     right_poly = mask_to_polyline(right_mask, detail=detail)
     top_poly = mask_to_polyline(top_mask, detail=detail) if include_top and top_mask is not None else None
+
+    left_poly = mask_to_polyline(left_mask, detail=detail) if left_mask is not None else None
+    back_poly = mask_to_polyline(back_mask, detail=detail) if back_mask is not None else None
 
     # Overlays (front overlay on the same resized ROI image)
     overlay_path = os.path.join(out_dir, "debug_overlay_front.png")
@@ -409,9 +430,23 @@ def generate_job(
                             top_poly,
                             os.path.join(out_dir, "debug_overlay_top.png"))
 
+    left_svg = None
+    back_svg = None
+
     # Face templates
     front_svg = os.path.join(out_dir, "face_front.svg")
     right_svg = os.path.join(out_dir, "face_right.svg")
+
+    if left_poly is not None:
+        left_svg = os.path.join(out_dir, "face_left.svg")
+        left_pts = fit_polyline_to_face(left_poly, block.W, block.H, margin_mm)
+        build_face_svg(left_svg, block.W, block.H, left_pts, f"LEFT (W×H) {block.W}×{block.H}mm")
+
+    if back_poly is not None:
+        back_svg = os.path.join(out_dir, "face_back.svg")
+        back_pts = fit_polyline_to_face(back_poly, block.L, block.H, margin_mm)
+        build_face_svg(back_svg, block.L, block.H, back_pts, f"BACK (L×H) {block.L}×{block.H}mm")
+
     top_svg: Optional[str] = None
 
     front_pts = fit_polyline_to_face(front_poly, block.L, block.H, margin_mm)
@@ -433,13 +468,21 @@ def generate_job(
         "FRONT": front_pts,
         "RIGHT": right_pts,
     }
+    
+    if left_poly is not None:
+        used_faces.add("LEFT")
+        outlines["LEFT"] = left_pts
+
+    if back_poly is not None:
+        used_faces.add("BACK")
+        outlines["BACK"] = back_pts
+
     if include_top and top_svg is not None:
+        used_faces.add("TOP")
         outlines["TOP"] = top_pts
-        
+
     print(f"[pipeline] mode={mode} out_dir={out_dir}")
-    build_net_layout_svg(net_svg, block.L, block.W, block.H,
-                        used_faces=used_faces,
-                        outlines=outlines)
+    build_net_layout_svg(net_svg, block.L, block.W, block.H, used_faces=used_faces, outlines=outlines)
 
     # Guide
     from guide import GuideMeta, generate_guide_md

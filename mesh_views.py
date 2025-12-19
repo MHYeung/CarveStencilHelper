@@ -9,12 +9,16 @@ def mesh_silhouette_mask(mesh: trimesh.Trimesh, view: str, img_size: int = 1024,
 
     if view == "front":
         X, Y = V[:, 0], V[:, 1]
+    elif view == "back":
+        X, Y = -V[:, 0], V[:, 1]
     elif view == "right":
         X, Y = V[:, 2], V[:, 1]
+    elif view == "left":
+        X, Y = -V[:, 2], V[:, 1]
     elif view == "top":
         X, Y = V[:, 0], V[:, 2]
     else:
-        raise ValueError("view must be front/right/top")
+        raise ValueError("view must be front/back/left/right/top")
 
     xmin, xmax = float(X.min()), float(X.max())
     ymin, ymax = float(Y.min()), float(Y.max())
