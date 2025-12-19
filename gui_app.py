@@ -187,7 +187,7 @@ class WorkerThread(QThread):
     finished_ok = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, image_path, block, margin_mm, detail, include_top, roi_xywh):
+    def __init__(self, image_path, block, margin_mm, detail, include_top, roi_xywh, mode = "2d"):
         super().__init__()
         self.image_path = image_path
         self.block = block
@@ -195,6 +195,7 @@ class WorkerThread(QThread):
         self.detail = detail
         self.include_top = include_top
         self.roi_xywh = roi_xywh
+        self.mode = mode
 
     def run(self):
         try:
@@ -205,7 +206,8 @@ class WorkerThread(QThread):
                 detail=self.detail,
                 include_top=self.include_top,
                 out_root="jobs",
-                roi_xywh=self.roi_xywh
+                roi_xywh=self.roi_xywh,
+                mode=self.mode,
             )
             self.finished_ok.emit(res)
         except Exception as e:
@@ -260,6 +262,11 @@ class MainWindow(QMainWindow):
         self.top_cb = QCheckBox("Include TOP template")
         self.top_cb.setChecked(True)
         left.addWidget(self.top_cb)
+
+        self.chk_3dguess = QCheckBox("3D Guess (TripoSR)")
+        self.chk_3dguess.setChecked(False)
+        left.addWidget(self.chk_3dguess)
+
 
         left.addWidget(QLabel("Detail (simple → detailed)"))
         self.detail_slider = QSlider(Qt.Horizontal)
@@ -365,13 +372,15 @@ class MainWindow(QMainWindow):
         self.export_btn.setEnabled(False)
         self.drop.setText("Processing…")
 
+        mode = "tripo3d" if self.chk_3dguess.isChecked() else "2d"
         self.worker = WorkerThread(
             image_path=self.image_path,
             block=block,
             margin_mm=margin_mm,
             detail=detail,
             include_top=self.top_cb.isChecked(),
-            roi_xywh=self.current_roi
+            roi_xywh=self.current_roi,
+            mode = mode,
         )
         self.worker.finished_ok.connect(self.on_done)
         self.worker.failed.connect(self.on_fail)

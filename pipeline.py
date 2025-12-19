@@ -314,6 +314,7 @@ def generate_job(
     include_top: bool,
     out_root: str = "jobs",
     roi_xywh: Optional[Tuple[int, int, int, int]] = None,   # ROI in original image pixels
+    mode: str = "2d",  # "2d" or "tripo3d"
 ) -> JobResult:
     os.makedirs(out_root, exist_ok=True)
 
@@ -342,31 +343,86 @@ def generate_job(
 
     img = _auto_resize(img)
     img.save(os.path.join(out_dir, "debug_roi_resized.png"))
+    # Ensure debug_roi.png always exists (for GUI display consistency)
+    if not os.path.exists(os.path.join(out_dir, "debug_roi.png")):
+        img.save(os.path.join(out_dir, "debug_roi.png"))
 
     mask = remove_background_to_mask(img)
     mask = normalize_subject_mask(mask, anchor_xy=(0.5, 0.75))
     cv2.imwrite(os.path.join(out_dir, "debug_mask.png"), mask)
 
-    poly = mask_to_polyline(mask, detail=detail)
+    front_mask = None
+    right_mask = None
+    top_mask = None
 
-    # ✅ overlay polyline on the same resized ROI image
-    overlay_path = os.path.join(out_dir, "debug_overlay.png")
-    save_polyline_overlay(img, poly, overlay_path)
+    if mode.lower() == "tripo3d":
+        # Use TripoSR mesh -> orthographic silhouettes -> masks
+        # (Requires: trimesh + your TripoSR folder working)
+        from recon_triposr import TripoSRReconstructor
+        from mesh_canonical import canonicalize_mesh
+        from mesh_views import mesh_silhouette_mask
+
+        recon_dir = os.path.join(out_dir, "recon")
+        os.makedirs(recon_dir, exist_ok=True)
+
+        # TripoSR works best on a cutout. Use the resized ROI image here.
+        cutout_path = os.path.join(out_dir, "debug_roi_resized.png")
+
+        recon = TripoSRReconstructor("third_party/TripoSR")
+        rr = recon.reconstruct(cutout_path, recon_dir)
+
+        mesh = canonicalize_mesh(rr.mesh)
+        mesh_path = os.path.join(out_dir, "debug_mesh.obj")
+        mesh.export(mesh_path)
+
+        front_mask = mesh_silhouette_mask(mesh, "front", img_size=1024)
+        right_mask = mesh_silhouette_mask(mesh, "right", img_size=1024)
+        top_mask = mesh_silhouette_mask(mesh, "top", img_size=1024) if include_top else None
+
+        cv2.imwrite(os.path.join(out_dir, "debug_front_mask.png"), front_mask)
+        cv2.imwrite(os.path.join(out_dir, "debug_right_mask.png"), right_mask)
+        if include_top and top_mask is not None:
+            cv2.imwrite(os.path.join(out_dir, "debug_top_mask.png"), top_mask)
+
+    else:
+        # Existing 2D approach: one silhouette reused
+        front_mask = mask
+        right_mask = mask
+        top_mask = mask if include_top else None
+
+    # Now extract polylines from whichever masks were selected
+    front_poly = mask_to_polyline(front_mask, detail=detail)
+    right_poly = mask_to_polyline(right_mask, detail=detail)
+    top_poly = mask_to_polyline(top_mask, detail=detail) if include_top and top_mask is not None else None
+
+    # Overlays (front overlay on the same resized ROI image)
+    overlay_path = os.path.join(out_dir, "debug_overlay_front.png")
+    save_polyline_overlay(img, front_poly, overlay_path)
+
+    # Optional: overlays for right/top (draw on their masks for debugging)
+    save_polyline_overlay(Image.fromarray(cv2.cvtColor(right_mask, cv2.COLOR_GRAY2RGB)),
+                        right_poly,
+                        os.path.join(out_dir, "debug_overlay_right.png"))
+
+    if include_top and top_poly is not None:
+        save_polyline_overlay(Image.fromarray(cv2.cvtColor(top_mask, cv2.COLOR_GRAY2RGB)),
+                            top_poly,
+                            os.path.join(out_dir, "debug_overlay_top.png"))
 
     # Face templates
     front_svg = os.path.join(out_dir, "face_front.svg")
     right_svg = os.path.join(out_dir, "face_right.svg")
     top_svg: Optional[str] = None
 
-    front_pts = fit_polyline_to_face(poly, block.L, block.H, margin_mm)
+    front_pts = fit_polyline_to_face(front_poly, block.L, block.H, margin_mm)
     build_face_svg(front_svg, block.L, block.H, front_pts, f"FRONT (L×H) {block.L}×{block.H}mm")
 
-    right_pts = fit_polyline_to_face(poly, block.W, block.H, margin_mm)
+    right_pts = fit_polyline_to_face(right_poly, block.W, block.H, margin_mm)
     build_face_svg(right_svg, block.W, block.H, right_pts, f"RIGHT (W×H) {block.W}×{block.H}mm")
 
-    if include_top:
+    if include_top and top_poly is not None:
         top_svg = os.path.join(out_dir, "face_top.svg")
-        top_pts = fit_polyline_to_face(poly, block.L, block.W, margin_mm)
+        top_pts = fit_polyline_to_face(top_poly, block.L, block.W, margin_mm)
         build_face_svg(top_svg, block.L, block.W, top_pts, f"TOP (L×W) {block.L}×{block.W}mm")
 
     # Net layout
@@ -374,12 +430,13 @@ def generate_job(
     used_faces = {"FRONT", "RIGHT"} | ({"TOP"} if include_top else set())
     net_svg = os.path.join(out_dir, "net_layout.svg")
     outlines = {
-    "FRONT": front_pts,
-    "RIGHT": right_pts,
+        "FRONT": front_pts,
+        "RIGHT": right_pts,
     }
-    if include_top:
+    if include_top and top_svg is not None:
         outlines["TOP"] = top_pts
-
+        
+    print(f"[pipeline] mode={mode} out_dir={out_dir}")
     build_net_layout_svg(net_svg, block.L, block.W, block.H,
                         used_faces=used_faces,
                         outlines=outlines)
@@ -412,12 +469,13 @@ def generate_job(
         z.write(net_svg, "net_layout.svg")
         z.write(guide_md_path, "carving_guide.md")
         # include debug artifacts (handy while developing)
-        dbg_mask = os.path.join(out_dir, "debug_mask.png")
-        if os.path.exists(dbg_mask):
-            z.write(dbg_mask, "debug_mask.png")
-        dbg_roi = os.path.join(out_dir, "debug_roi.png")
-        if os.path.exists(dbg_roi):
-            z.write(dbg_roi, "debug_roi.png")
+        for name in [
+            "debug_overlay_front.png", "debug_overlay_right.png", "debug_overlay_top.png",
+            "debug_front_mask.png", "debug_right_mask.png", "debug_top_mask.png",
+            "debug_mesh.obj"]:
+            p = os.path.join(out_dir, name)
+            if os.path.exists(p):
+                z.write(p, name)
 
     return JobResult(
         job_id=folder_name,
